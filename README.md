@@ -8,10 +8,12 @@ O **FleetMaster Bot** é um assistente logístico inteligente que integra o **Go
 1. [Configuração do Google AI Studio](#1-configuração-do-google-ai-studio)
 2. [Ambiente Local e Google Cloud CLI](#2-ambiente-local-e-google-cloud-cli)
 3. [Segurança com Google Secret Manager](#3-segurança-com-google-secret-manager)
-4. [Configuração do Firebase](#4-configuração-do-firebase)
-5. [Desenvolvimento e Deploy](#5-desenvolvimento-e-deploy)
-6. [Túnel com Ngrok](#6-túnel-com-ngrok)
-7. [Testes e Validação](#7-testes-e-validação)
+4. [Configuração do Firebase e Firestore](#4-configuração-do-firebase-e-firestore)
+5. [Configuração da Evolution API (Docker)](#5-configuração-da-evolution-api-docker)
+6. [Túnel e Exposição com Ngrok](#6-túnel-e-exposição-com-ngrok)
+7. [Desenvolvimento e Deploy](#7-desenvolvimento-e-deploy)
+8. [Monitoramento e Alertas](#8-monitoramento-e-alertas)
+9. [Testes e Validação](#9-testes-e-validação)
 
 ---
 
@@ -19,17 +21,22 @@ O **FleetMaster Bot** é um assistente logístico inteligente que integra o **Go
 O "cérebro" do bot é o modelo Gemini hospedado no AI Studio.
 
 1.  Acesse o [Google AI Studio](https://aistudio.google.com/).
-2.  **Plano**: Garanta que o faturamento esteja ativo ou use a cota gratuita (ajuste para o plano Pay-as-you-go se necessário para produção).
-3.  **API Key**: Gere sua chave. Ela terá o prefixo `AQ.A...` (novo formato 2026).
-4.  **Modelo**: O sistema está configurado para o `gemini-2.5-flash`.
+2.  **Plano**: Clique em **Settings > Billing** para ativar o faturamento (plano Pay-as-you-go) ou use a cota gratuita para testes.
+3.  **Prompt**: Crie um novo Chat Prompt para testar suas regras de negócio.
+4.  **API Key**: Gere sua chave em "Get API Key". Ela terá o prefixo `AQ.A...`.
+5.  **Modelo**: O sistema está configurado para o `gemini-2.5-flash`.
 
 ---
 
 ## 2. Ambiente Local e Google Cloud CLI
 Prepare seu terminal para gerenciar os serviços do Google Cloud.
 
-### Instalar Google Cloud CLI
+### Instalar Dependências Básicas
 ```bash
+# Node.js e NPM (Recomendado v20+)
+sudo apt update && sudo apt install nodejs npm git -y
+
+# Google Cloud CLI
 sudo snap install google-cloud-cli --classic
 ```
 
@@ -45,7 +52,7 @@ gcloud config set project [ID-DO-SEU-PROJETO]
 ---
 
 ## 3. Segurança com Google Secret Manager
-Em vez de usar arquivos `.env` (que podem vazar chaves), utilizamos o **Secret Manager** para armazenar credenciais sensíveis.
+Em vez de usar arquivos `.env`, utilizamos o **Secret Manager** para máxima segurança.
 
 ### Criar os Secrets
 ```bash
@@ -55,16 +62,15 @@ gcloud secrets create EVOLUTION_API_KEY --replication-policy="automatic"
 gcloud secrets create EVOLUTION_INSTANCE --replication-policy="automatic"
 ```
 
-### Adicionar Valores aos Secrets
+### Adicionar Valores (Exemplos)
 ```bash
-echo -n "SUA_API_KEY_AQUI" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
+echo -n "AQ.A_SUA_CHAVE_GEMINI" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
 echo -n "https://sua-url-ngrok.ngrok-free.app" | gcloud secrets versions add EVOLUTION_API_URL --data-file=-
-echo -n "sua_chave_evolution" | gcloud secrets versions add EVOLUTION_API_KEY --data-file=-
-echo -n "nome_da_instancia" | gcloud secrets versions add EVOLUTION_INSTANCE --data-file=-
+echo -n "chave_mestra_123" | gcloud secrets versions add EVOLUTION_API_KEY --data-file=-
+echo -n "fleetmaster" | gcloud secrets versions add EVOLUTION_INSTANCE --data-file=-
 ```
 
-### Dar Permissão de Acesso à Function
-Substitua `[NUMERO_DO_PROJETO]` pelo número real do seu projeto Google Cloud.
+### Permissões de Acesso
 ```bash
 for secret in GEMINI_API_KEY EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_INSTANCE; do
   gcloud secrets add-iam-policy-binding $secret \
@@ -75,42 +81,72 @@ done
 
 ---
 
-## 4. Configuração do Firebase
-O Firebase gerencia as Cloud Functions e o banco de dados Firestore.
+## 4. Configuração do Firebase e Firestore
+O Firebase gerencia as Cloud Functions e o banco de dados.
 
-### Firestore (Permissões)
-Garantir que o Firestore esteja no modo nativo e com regras de segurança que permitam o acesso das Functions.
-*   **Coleções necessárias**: `conversations` (histórico) e `processed_messages` (deduplicação).
+1.  **Habilitar Firestore**: No console do Firebase, crie o banco de dados em **Modo Nativo**.
+2.  **Regras**: Use as regras padrão que permitem leitura/escrita para o Service Account da Function.
+3.  **Inicialização Local**:
+    ```bash
+    npm install -g firebase-tools
+    firebase login
+    firebase init functions
+    ```
 
-### Inicialização local
+---
+
+## 5. Configuração da Evolution API (Docker)
+A Evolution API é o gateway para o WhatsApp.
+
+1.  Navegue até a pasta: `cd evolution-api`
+2.  Suba os serviços:
+    ```bash
+    docker-compose up -d
+    ```
+    *Isso iniciará a API, o PostgreSQL e o Redis.*
+
+---
+
+## 6. Túnel e Exposição com Ngrok
+O ngrok expõe sua porta local 8080 para que o Firebase possa enviar mensagens de volta para a Evolution API.
+
+### Instalação
 ```bash
-npm install -g firebase-tools
-firebase login
-firebase init functions
+# Via Snap (Linux)
+sudo snap install ngrok
+
+# Ou download direto
+curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list && sudo apt update && sudo apt install ngrok
+```
+
+### Configuração e Autenticação
+1.  Crie uma conta em [ngrok.com](https://ngrok.com/).
+2.  Adicione seu token:
+    ```bash
+    ngrok config add-authtoken [SEU_TOKEN_AQUI]
+    ```
+
+### Execução e Inspeção
+```bash
+# Iniciar túnel
+ngrok http 8080
+
+# Monitorar tráfego (Painel de Inspeção)
+# Acesse no navegador: http://localhost:4040
 ```
 
 ---
 
-## 5. Desenvolvimento e Deploy
-
-### Instalar Dependências
-```bash
-cd functions
-npm install @google/genai axios firebase-admin firebase-functions
-```
+## 7. Desenvolvimento e Deploy
 
 ### Build e Deploy
-Sempre execute o build antes do deploy para transpilar o TypeScript.
 ```bash
-# Compilar TS para JS
+cd functions
 npm run build
-
-# Deploy apenas da função do Webhook
 firebase deploy --only functions
 ```
 
 ### Limpeza de Variáveis Legadas
-Se você migrou do `.env` para o Secret Manager, remova as variáveis antigas para evitar conflitos:
 ```bash
 gcloud run services update whatsappwebhook \
   --region=us-central1 \
@@ -119,23 +155,23 @@ gcloud run services update whatsappwebhook \
 
 ---
 
-## 6. Túnel com Ngrok
-Para que a Evolution API (local ou docker) consiga falar com o mundo externo ou para testes locais.
+## 8. Monitoramento e Alertas
+Mantenha o sistema saudável configurando alertas no Google Cloud Console.
 
-1.  Inicie o ngrok na porta da sua Evolution API (geralmente 8080):
-    ```bash
-    ngrok http 8080
-    ```
-2.  Acompanhe as requisições em tempo real:
-    Acesse [http://localhost:4040](http://localhost:4040) no seu navegador.
+1.  **Logs**: Acesse **Logs Explorer** e filtre por `resource.type="cloud_function"`.
+2.  **Alertas de Erro**:
+    *   Vá em **Monitoring > Alerting**.
+    *   Crie uma política baseada em "Error Reporting".
+    *   Configure notificações por E-mail ou Slack para erros `Fatal Error` identificados nos logs do bot.
+3.  **Uso de Cota**: Monitore o consumo da API Gemini para evitar interrupções inesperadas.
 
 ---
 
-## 7. Testes e Validação
-Você pode simular um recebimento de mensagem do WhatsApp usando o `curl`.
+## 9. Testes e Validação
+Simule uma mensagem do WhatsApp:
 
 ```bash
-curl -X POST "https://us-central1-[SEU-PROJETO].cloudfunctions.net/whatsappWebhook" \
+curl -X POST "https://[URL-DA-SUA-FUNCTION]/whatsappWebhook" \
   -H "Content-Type: application/json" \
   -d '{
     "event": "messages.upsert",
@@ -143,15 +179,13 @@ curl -X POST "https://us-central1-[SEU-PROJETO].cloudfunctions.net/whatsappWebho
       "key": {
         "remoteJid": "5511999999999@s.whatsapp.net",
         "fromMe": false,
-        "id": "TEST_MESSAGE_ID_001"
+        "id": "MSG_TESTE_123"
       },
-      "message": {
-        "conversation": "Olá, como funciona o plano Starter?"
-      }
+      "message": { "conversation": "Como posso contratar?" }
     },
     "sender": "5511999999999@s.whatsapp.net"
   }'
 ```
 
 ---
-*Este projeto foi estruturado seguindo as melhores práticas de Engenharia de Software e Segurança.*
+*FleetMaster Logistics - Engenharia de Software de Alta Performance.*
