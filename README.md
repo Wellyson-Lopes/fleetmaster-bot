@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/1b3c5a23-c601-4b75-a0e5-0db44b62d788
+
 # 🚛 FleetMaster Bot
 
 Bot de atendimento via WhatsApp com inteligência artificial, construído sobre Firebase Cloud Functions, Google Gemini e Evolution API.
