@@ -8,6 +8,10 @@ Bot de atendimento via WhatsApp com inteligência artificial, construído sobre 
 
 ---
 
+https://github.com/user-attachments/assets/5706b7f5-d34f-47ab-a271-d6a57aaf82d1
+
+
+
 ## 📑 Índice
 
 - [Visão Geral](#visão-geral)
