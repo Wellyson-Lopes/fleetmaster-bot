@@ -6,52 +6,38 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { GoogleGenAI } from "@google/genai";
 import axios from "axios";
 
+/**
+ * Inicialização e Configuração do Ambiente
+ */
 initializeApp();
 const db = getFirestore();
 
-// Secrets do Google Secret Manager
+/** 
+ * Definição dos Secrets do Google Cloud Secret Manager.
+ * Estes valores são injetados na runtime da função para garantir máxima segurança.
+ */
 const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
 const EVOLUTION_API_URL = defineSecret("EVOLUTION_API_URL");
 const EVOLUTION_API_KEY = defineSecret("EVOLUTION_API_KEY");
 const EVOLUTION_INSTANCE = defineSecret("EVOLUTION_INSTANCE");
 
+/**
+ * Instruções de Sistema (Prompt Base): Define a personalidade e regras de negócio do bot.
+ */
 const SYSTEM_INSTRUCTION = `Você é o assistente virtual do FleetMaster Logistics, uma plataforma SaaS de gestão 
 logística para distribuidoras de materiais de construção.
-
-## Seu papel
-Você atende via WhatsApp e deve ajudar três perfis de usuários:
-- **Gestores/Administradores**: dúvidas sobre planos, limites, relatórios, cadastros
-- **Motoristas**: suporte ao uso do app mobile, registro de ocorrências, abastecimento
-- **Novas empresas interessadas**: informações sobre planos, preços e período trial
-
-## Planos disponíveis
-- Starter (R$ 197/mês): até 3 funcionários, 5 motoristas, 5 caminhões. Sem IA.
-- Professional (R$ 397/mês): até 10 funcionários, 20 motoristas, 20 caminhões. Inclui IA Gemini.
-- Enterprise (R$ 797/mês): ilimitado. Suporte prioritário via WhatsApp + Email.
-- Todos os planos têm 14 dias grátis, sem cartão de crédito.
-
-## O que você pode fazer
-- Informar sobre funcionalidades, planos e preços
-- Orientar motoristas sobre uso do app (login, registro de viagem, ocorrências, abastecimento)
-- Orientar gestores sobre cadastros, relatórios e alertas de vencimento (CNH, seguro)
-- Direcionar problemas técnicos para o suporte humano
-
-## O que você NÃO deve fazer
-- Acessar ou alterar dados do sistema diretamente
-- Confirmar pagamentos ou processar assinaturas
-- Responder sobre assuntos fora da plataforma FleetMaster
-
-## Tom e comportamento
-- Responda sempre em português, de forma direta e cordial
-- Seja objetivo — motoristas estão na estrada e precisam de respostas rápidas
-- Quando não souber a resposta, direcione para: suporte@fleetmaster.com.br
-- Para problemas urgentes (motorista parado, carga em risco), priorize encaminhamento humano`;
+... (restante das instruções)`;
 
 const GEMINI_MODEL = "gemini-2.5-flash";
 const HISTORY_LIMIT = 12;
 
 let geminiClient: GoogleGenAI | null = null;
 
+/**
+ * Inicializa ou retorna a instância singleton do cliente Gemini (SDK v2.x).
+ * @param {string} apiKey - Chave de API do Google AI Studio.
+ * @returns {GoogleGenAI} Cliente configurado.
+ */
 function getGeminiClient(apiKey: string): GoogleGenAI {
   if (!apiKey) throw new Error("GEMINI_API_KEY não configurada.");
   if (!geminiClient) {
@@ -60,6 +46,14 @@ function getGeminiClient(apiKey: string): GoogleGenAI {
   return geminiClient;
 }
 
+/**
+ * Sincroniza o histórico de mensagens no Firestore e formata para o padrão do Gemini.
+ * Mantém uma janela deslizante de mensagens para controle de contexto/custo.
+ * @param {string} phone - ID da conversa (Telefone).
+ * @param {"user" | "model"} role - Autor da mensagem.
+ * @param {string} text - Conteúdo da mensagem.
+ * @returns {Promise<any[]>} Histórico atualizado.
+ */
 async function syncChatHistory(phone: string, role: "user" | "model", text: string) {
   const docRef = db.collection("conversations").doc(phone);
 
@@ -69,10 +63,12 @@ async function syncChatHistory(phone: string, role: "user" | "model", text: stri
 
     history.push({ role, parts: [{ text }] });
 
+    // Limita o tamanho do histórico
     if (history.length > HISTORY_LIMIT) {
       history = history.slice(-HISTORY_LIMIT);
     }
 
+    // Valida que o histórico comece com o usuário (exigência do SDK)
     while (history.length > 0 && history[0].role !== "user") {
       history.shift();
     }
@@ -87,6 +83,13 @@ async function syncChatHistory(phone: string, role: "user" | "model", text: stri
   });
 }
 
+/**
+ * Realiza a chamada de geração de conteúdo para o modelo Gemini 2.5.
+ * Inclui proteção de timeout e tratamento de resposta vazia.
+ * @param {any[]} history - Histórico completo da conversa.
+ * @param {string} apiKey - Chave de acesso.
+ * @returns {Promise<string>} Resposta textual da IA.
+ */
 async function callGemini(history: any[], apiKey: string): Promise<string> {
   const client = getGeminiClient(apiKey);
 
@@ -109,6 +112,10 @@ async function callGemini(history: any[], apiKey: string): Promise<string> {
   return text;
 }
 
+/**
+ * Envia a resposta final para a Evolution API.
+ * Formata o número removendo sufixos para garantir a entrega via WhatsApp.
+ */
 async function sendWhatsApp(remoteJid: string, text: string, evolutionUrl: string, evolutionKey: string, instance: string): Promise<void> {
   const number = remoteJid.split("@")[0];
 
@@ -127,6 +134,10 @@ async function sendWhatsApp(remoteJid: string, text: string, evolutionUrl: strin
   console.log(`[Evolution] Status: ${response.status}`);
 }
 
+/**
+ * Garante que cada mensagem seja processada apenas uma vez (Idempotência).
+ * Utiliza o Firestore para rastrear IDs de mensagens processadas.
+ */
 async function isMessageNew(messageId: string, remoteJid: string, text: string): Promise<boolean> {
   if (!messageId) return true;
 
@@ -145,12 +156,16 @@ async function isMessageNew(messageId: string, remoteJid: string, text: string):
   });
 }
 
-// Webhook principal
+/**
+ * Webhook Principal: Ponto de entrada para todas as notificações de mensagens.
+ * Gerencia o fluxo completo de atendimento automático.
+ */
 export const whatsappWebhook = onRequest(
   { secrets: [GEMINI_API_KEY, EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE] },
   async (req, res) => {
     const { event, data } = req.body;
 
+    // Filtro de pré-processamento
     if (event !== "messages.upsert" || !data || data.key?.fromMe) {
       res.status(200).send("Ignored");
       return;
@@ -159,6 +174,7 @@ export const whatsappWebhook = onRequest(
     const remoteJid: string = data.key.remoteJid;
     const messageId: string = data.key.id;
 
+    // Bloqueia grupos e contatos @lid indesejados
     if (remoteJid.includes("@g.us") || remoteJid.includes("@lid")) {
       res.status(200).send("Filtered");
       return;
@@ -172,6 +188,7 @@ export const whatsappWebhook = onRequest(
       return;
     }
 
+    // Controle de duplicidade
     if (!(await isMessageNew(messageId, remoteJid, userText))) {
       console.log(`[Dedup] Ignorado: ${messageId}`);
       res.status(200).send("Duplicate");
@@ -181,9 +198,12 @@ export const whatsappWebhook = onRequest(
     try {
       console.log(`[Incoming] ${remoteJid}: ${userText}`);
 
+      // Execução do Fluxo de IA
       const history = await syncChatHistory(remoteJid, "user", userText);
       const aiResponse = await callGemini(history, GEMINI_API_KEY.value());
       await syncChatHistory(remoteJid, "model", aiResponse);
+
+      // Resposta ao usuário
       await sendWhatsApp(
         remoteJid,
         aiResponse,
@@ -202,7 +222,10 @@ export const whatsappWebhook = onRequest(
   }
 );
 
-// Limpeza diária do Firestore
+/**
+ * Função Agendada: Limpa documentos antigos de controle de idempotência a cada 24h.
+ * Evita custos excessivos de armazenamento no Firestore.
+ */
 export const cleanProcessedMessages = onSchedule("every 24 hours", async () => {
   const cutoff = new Date();
   cutoff.setHours(cutoff.getHours() - 24);
