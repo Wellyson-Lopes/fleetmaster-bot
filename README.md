@@ -153,6 +153,7 @@ Aguarde até ver `HTTP - ON: 8080`. Confirme no terminal:
 ```bash
 curl http://localhost:8080
 ```
+<img width="1844" height="813" alt="image" src="https://github.com/user-attachments/assets/aa8905c7-24f9-43a8-8cee-8d912e119eea" />
 
 Resposta esperada:
 ```json
