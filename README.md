@@ -1,206 +1,157 @@
-# 🚛 FleetMaster Bot — WhatsApp AI Assistant
+# 🚛 FleetMaster Bot
 
-Bot de atendimento via WhatsApp integrado ao Gemini AI, construído com Firebase Cloud Functions, Evolution API e Google Secret Manager.
+Bot de atendimento via WhatsApp com inteligência artificial, construído sobre Firebase Cloud Functions, Google Gemini e Evolution API.
 
 ---
 
-## 🏗️ Arquitetura
+## 📑 Índice
+
+- [Visão Geral](#visão-geral)
+- [Arquitetura](#arquitetura)
+- [Pré-requisitos](#pré-requisitos)
+- [1. Google AI Studio](#1-google-ai-studio)
+- [2. Firebase](#2-firebase)
+- [3. Evolution API](#3-evolution-api)
+- [4. ngrok](#4-ngrok)
+- [5. Google Secret Manager](#5-google-secret-manager)
+- [6. Deploy](#6-deploy)
+- [7. Webhook](#7-webhook)
+- [8. Monitoramento](#8-monitoramento)
+- [9. Testando](#9-testando)
+- [10. Problemas Comuns](#10-problemas-comuns)
+
+---
+
+## Visão Geral
+
+O FleetMaster Bot recebe mensagens do WhatsApp, consulta o histórico da conversa no Firestore, envia o contexto ao Gemini e devolve a resposta ao usuário — tudo em tempo real via Cloud Functions.
+
+O histórico é armazenado por número de telefone no Firestore, o que controla o consumo de tokens e reduz custos. Mensagens duplicadas são descartadas via deduplicação com transação atômica. Chaves de API ficam no Google Secret Manager, nunca no código.
+
+---
+
+## Arquitetura
 
 ```
-WhatsApp → Evolution API → Cloud Function (Firebase) → Gemini AI → Evolution API → WhatsApp
-                                        ↕
-                                   Firestore DB
-                                (histórico por número)
+WhatsApp
+   │
+   ▼
+Evolution API  ──webhook──►  Cloud Function (Firebase)
+                                      │
+                          ┌───────────┼───────────┐
+                          ▼           ▼           ▼
+                       Firestore   Gemini AI   Secret Manager
+                    (histórico)  (resposta)   (chaves seguras)
+                          │
+                          ▼
+                    Evolution API  ──►  WhatsApp
 ```
 
 ---
 
-## 📋 Pré-requisitos
+## Pré-requisitos
 
-- Node.js 18+
-- Docker e Docker Compose
-- Conta Google (Firebase + Google Cloud)
-- Conta Google AI Studio
-- ngrok (para desenvolvimento local)
+- [Node.js 18+](https://nodejs.org)
+- [Docker e Docker Compose](https://docs.docker.com/get-docker/)
+- [Conta Google](https://accounts.google.com)
+- [Conta ngrok](https://ngrok.com) (desenvolvimento local)
 
 ---
 
-## 1. 🧠 Configurando o Google AI Studio
+## 1. Google AI Studio
 
-### 1.1 Acessar o AI Studio
+O AI Studio é onde você define o comportamento do bot através do **System Instruction** e obtém a chave de acesso ao Gemini.
+
+**Passos:**
 
 1. Acesse [aistudio.google.com](https://aistudio.google.com)
 2. Clique em **"Create new prompt"**
-3. Em **"System Instructions"** defina as regras de negócio do bot
-4. Escolha o modelo **Gemini 2.5 Flash** (melhor custo-benefício para bots)
-5. Teste o prompt interativamente antes de seguir
+3. Em **"System Instructions"** escreva as regras de negócio do bot (tom, escopo, limitações)
+4. Selecione o modelo **Gemini 2.5 Flash**
+5. Teste o comportamento interativamente antes de continuar
+6. Vá em **"Get API Key"** → **"Create API Key"**
+7. Selecione um projeto Google Cloud **sem organização** — projetos com organização corporativa podem bloquear a chave
+8. Copie e guarde a chave gerada com segurança
 
-### 1.2 Gerar a API Key
-
-1. No menu lateral clique em **"Get API Key"**
-2. Clique em **"Create API Key"**
-3. Selecione um projeto Google Cloud existente ou crie um novo **sem organização**
-4. Guarde a chave gerada com segurança — ela não será exibida novamente
-
-> ⚠️ **Importante:** Chaves geradas em projetos com organização corporativa podem ter restrições. Se a chave começar com `AQ.` em vez de `AIza`, crie um projeto sem organização.
+> ℹ️ O System Instruction definido aqui é a fonte da verdade do comportamento do bot. O código apenas o referencia — não duplique regras de negócio em dois lugares.
 
 ---
 
-## 2. 🔥 Preparando o Firebase
+## 2. Firebase
+
+O Firebase hospeda a Cloud Function e o banco de dados Firestore.
 
 ### 2.1 Criar o projeto
 
 1. Acesse [console.firebase.google.com](https://console.firebase.google.com)
 2. Clique em **"Adicionar projeto"**
-3. Dê um nome ao projeto (ex: `fleetmaster-bot`)
-4. No canto inferior esquerdo, clique em **"Spark"** → **"Fazer upgrade"** → selecione **Blaze**
-
-> ⚠️ O plano Blaze é necessário pois Cloud Functions fazem requisições externas (Gemini, Evolution API).
+3. No canto inferior esquerdo faça upgrade para o plano **Blaze** — é obrigatório para Cloud Functions fazerem chamadas externas
 
 ### 2.2 Criar o Firestore
 
 1. No menu lateral clique em **"Firestore Database"**
-2. Clique em **"Criar banco de dados"**
-3. Selecione **"Iniciar no modo de teste"**
-4. Região: **`us-east1`**
+2. Clique em **"Criar banco de dados"** → **"Modo de teste"**
+3. Região: **`us-east1`**
 
-### 2.3 Configurar regras do Firestore
-
-Na aba **"Regras"** do Firestore, substitua por:
-
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if request.auth != null;
-    }
-  }
-}
-```
-
-### 2.4 Instalar o Firebase CLI
+### 2.3 Instalar o Firebase CLI e inicializar o projeto
 
 ```bash
 npm install -g firebase-tools
 firebase login
-```
-
-### 2.5 Inicializar o projeto
-
-```bash
-mkdir fleetmaster-bot
-cd fleetmaster-bot
 firebase init functions
 ```
 
-Nas perguntas do init, escolha:
+Nas perguntas do `init`:
 - **Use an existing project** → selecione o projeto criado
 - **Language** → TypeScript
 - **ESLint** → No
 - **Install dependencies** → Yes
 
-### 2.6 Instalar dependências
+### 2.4 Instalar dependências do projeto
 
 ```bash
 cd functions
 npm install @google/genai axios firebase-functions
 ```
 
+> ℹ️ Usamos o SDK oficial `@google/genai` em vez de chamadas HTTP diretas (Axios) porque o SDK gerencia autenticação, tipagem TypeScript e retry automático. Se a API do Gemini mudar, basta atualizar o pacote.
+
 ---
 
-## 3. 🐳 Configurando a Evolution API (Docker)
+## 3. Evolution API
 
-### 3.1 Estrutura de pastas
+A Evolution API é a ponte entre o WhatsApp e o webhook. Roda localmente via Docker com PostgreSQL como banco de dados.
 
-```
-fleetmaster-bot/
-├── evolution-api/
-│   ├── docker-compose.yml
-│   └── .env
-└── functions/
-    └── src/
-        └── index.ts
+### 3.1 Configurar as variáveis de ambiente
+
+Crie o arquivo `evolution-api/.env` com base no `evolution-api/.env.example` disponível no repositório:
+
+```bash
+cp evolution-api/.env.example evolution-api/.env
 ```
 
-### 3.2 Criar o arquivo `.env` da Evolution API
+Edite o arquivo e preencha os valores:
 
-Crie o arquivo `evolution-api/.env`:
+- `AUTHENTICATION_API_KEY` — chave que você define para proteger a API (mínimo 20 caracteres)
+- `CONFIG_SESSION_PHONE_VERSION` — versão do cliente WhatsApp Web. Consulte a versão mais recente na [documentação oficial](https://doc.evolution-api.com) se o QR Code não aparecer
 
-```env
-AUTHENTICATION_TYPE=apikey
-AUTHENTICATION_API_KEY=sua_chave_aqui_minimo_20_caracteres
-AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
-DATABASE_PROVIDER=postgresql
-DATABASE_CONNECTION_URI=postgresql://evolution:evolution123@postgres:5432/evolution?schema=public
-QRCODE_LIMIT=30
-STORE_MESSAGES=true
-STORE_MESSAGE_UP=true
-STORE_CONTACTS=true
-STORE_CHATS=true
-CONFIG_SESSION_PHONE_VERSION=2.3000.1040689878
-```
-
-> ⚠️ A variável `CONFIG_SESSION_PHONE_VERSION` é crítica — sem ela o QR Code não é gerado. Verifique a versão mais recente na [documentação oficial](https://doc.evolution-api.com).
-
-### 3.3 Criar o `docker-compose.yml`
-
-Crie o arquivo `evolution-api/docker-compose.yml`:
-
-```yaml
-services:
-  postgres:
-    image: postgres:15
-    container_name: evolution-postgres
-    environment:
-      - POSTGRES_USER=evolution
-      - POSTGRES_PASSWORD=evolution123
-      - POSTGRES_DB=evolution
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U evolution"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: always
-
-  evolution-api:
-    image: atendai/evolution-api:v2.1.1
-    container_name: evolution-api
-    ports:
-      - "8080:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
-      - .env
-    volumes:
-      - evolution_data:/evolution/instances
-    restart: always
-
-volumes:
-  postgres_data:
-  evolution_data:
-```
-
-### 3.4 Subir os containers
+### 3.2 Subir os containers
 
 ```bash
 cd evolution-api
 docker-compose up -d
 ```
 
-### 3.5 Verificar se está rodando
+### 3.3 Verificar se está rodando
 
 ```bash
 docker logs evolution-api --tail 20
 ```
 
-A saída deve mostrar `HTTP - ON: 8080`. Teste no navegador:
+Aguarde até ver `HTTP - ON: 8080`. Confirme no terminal:
 
-```
-http://localhost:8080
+```bash
+curl http://localhost:8080
 ```
 
 Resposta esperada:
@@ -208,11 +159,7 @@ Resposta esperada:
 {"status":200,"message":"Welcome to the Evolution API, it is working!"}
 ```
 
----
-
-## 4. 📱 Conectando o WhatsApp
-
-### 4.1 Criar a instância
+### 3.4 Criar a instância e conectar o WhatsApp
 
 ```bash
 curl -X POST "http://localhost:8080/instance/create" \
@@ -225,65 +172,56 @@ curl -X POST "http://localhost:8080/instance/create" \
   }'
 ```
 
-### 4.2 Conectar pelo QR Code
+Acesse o manager no navegador, faça login com sua API key e escaneie o QR Code:
 
-1. Acesse `http://localhost:8080/manager`
-2. Faça login com sua API key
-3. Clique na instância **fleetmaster**
-4. Clique em **"Get QR Code"**
-5. Escaneie com o WhatsApp: **Configurações → Dispositivos conectados → Conectar dispositivo**
+```
+http://localhost:8080/manager
+```
 
-### 4.3 Verificar conexão
+Confirme que a instância está conectada:
 
 ```bash
 curl -X GET "http://localhost:8080/instance/fetchInstances" \
   -H "apikey: SUA_CHAVE_EVOLUTION"
 ```
 
-O campo `connectionStatus` deve ser `"open"`.
+O campo `connectionStatus` deve retornar `"open"`.
 
 ---
 
-## 5. 🌐 Expondo a Evolution API com ngrok
+## 4. ngrok
 
-> O ngrok é necessário para que a Cloud Function (hospedada no Google) consiga chamar a Evolution API rodando localmente.
+Em desenvolvimento, a Cloud Function roda nos servidores do Google e não consegue alcançar `localhost`. O ngrok cria um túnel público que redireciona para a Evolution API local.
 
-### 5.1 Instalar o ngrok
+### 4.1 Instalar
 
 ```bash
-curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-  | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
-  && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
-  | sudo tee /etc/apt/sources.list.d/ngrok.list \
-  && sudo apt update \
-  && sudo apt install ngrok
+sudo snap install ngrok
 ```
 
-### 5.2 Autenticar
-
-1. Crie uma conta em [ngrok.com](https://ngrok.com)
-2. Copie o token do dashboard
-3. Execute:
+### 4.2 Autenticar
 
 ```bash
 ngrok config add-authtoken SEU_TOKEN_NGROK
 ```
 
-### 5.3 Expor a porta 8080
+### 4.3 Expor a porta da Evolution API
 
 ```bash
 ngrok http 8080
 ```
 
-Anote a URL gerada (ex: `https://xxxx-xxx-xxx.ngrok-free.app`). Ela será usada como `EVOLUTION_API_URL`.
+Anote a URL gerada (ex: `https://xxxx.ngrok-free.app`). Ela será usada como `EVOLUTION_API_URL` no Secret Manager.
 
-> ⚠️ No plano gratuito do ngrok a URL muda a cada reinicialização. Para produção, use uma VPS.
+> ⚠️ No plano gratuito do ngrok a URL muda a cada reinicialização. Sempre que isso acontecer, atualize o secret `EVOLUTION_API_URL` e faça um novo deploy. Para produção, hospede a Evolution API em uma VPS com URL fixa.
 
 ---
 
-## 6. 🔐 Configurando o Google Secret Manager
+## 5. Google Secret Manager
 
-### 6.1 Instalar o Google Cloud CLI
+As chaves de API ficam no Secret Manager — nunca no código ou em arquivos `.env` commitados. A Cloud Function acessa os secrets em tempo de execução com permissão explícita.
+
+### 5.1 Instalar o Google Cloud CLI
 
 ```bash
 sudo snap install google-cloud-cli --classic
@@ -291,7 +229,7 @@ gcloud auth login
 gcloud config set project SEU_PROJECT_ID
 ```
 
-### 6.2 Criar os secrets
+### 5.2 Criar os secrets
 
 ```bash
 gcloud secrets create GEMINI_API_KEY --replication-policy="automatic"
@@ -300,7 +238,7 @@ gcloud secrets create EVOLUTION_API_KEY --replication-policy="automatic"
 gcloud secrets create EVOLUTION_INSTANCE --replication-policy="automatic"
 ```
 
-### 6.3 Adicionar os valores
+### 5.3 Adicionar os valores
 
 ```bash
 echo -n "SUA_CHAVE_GEMINI" | gcloud secrets versions add GEMINI_API_KEY --data-file=-
@@ -309,7 +247,9 @@ echo -n "SUA_CHAVE_EVOLUTION" | gcloud secrets versions add EVOLUTION_API_KEY --
 echo -n "fleetmaster" | gcloud secrets versions add EVOLUTION_INSTANCE --data-file=-
 ```
 
-### 6.4 Dar permissão à Cloud Function
+### 5.4 Dar permissão à conta de serviço da Cloud Function
+
+Substitua `SEU_PROJECT_NUMBER` pelo número do projeto (visível no Google Cloud Console):
 
 ```bash
 for secret in GEMINI_API_KEY EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_INSTANCE; do
@@ -319,233 +259,11 @@ for secret in GEMINI_API_KEY EVOLUTION_API_URL EVOLUTION_API_KEY EVOLUTION_INSTA
 done
 ```
 
-> Substitua `SEU_PROJECT_NUMBER` pelo número do seu projeto (visível no Google Cloud Console).
-
 ---
 
-## 7. ☁️ Criando a Cloud Function
+## 6. Deploy
 
-### 7.1 Código completo — `functions/src/index.ts`
-
-```typescript
-import { onRequest } from "firebase-functions/v2/https";
-import { onSchedule } from "firebase-functions/v2/scheduler";
-import { defineSecret } from "firebase-functions/params";
-import { initializeApp } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { GoogleGenAI } from "@google/genai";
-import axios from "axios";
-
-initializeApp();
-const db = getFirestore();
-
-// Secrets do Google Secret Manager
-const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
-const EVOLUTION_API_URL = defineSecret("EVOLUTION_API_URL");
-const EVOLUTION_API_KEY = defineSecret("EVOLUTION_API_KEY");
-const EVOLUTION_INSTANCE = defineSecret("EVOLUTION_INSTANCE");
-
-const SYSTEM_INSTRUCTION = `Você é o assistente virtual do FleetMaster Logistics...
-// Defina aqui as regras de negócio do seu bot`;
-
-const GEMINI_MODEL = "gemini-2.5-flash";
-const HISTORY_LIMIT = 12;
-
-let geminiClient: GoogleGenAI | null = null;
-
-function getGeminiClient(apiKey: string): GoogleGenAI {
-  if (!apiKey) throw new Error("GEMINI_API_KEY não configurada.");
-  if (!geminiClient) {
-    geminiClient = new GoogleGenAI({ apiKey });
-  }
-  return geminiClient;
-}
-
-async function syncChatHistory(phone: string, role: "user" | "model", text: string) {
-  const docRef = db.collection("conversations").doc(phone);
-
-  return await db.runTransaction(async (transaction) => {
-    const doc = await transaction.get(docRef);
-    let history: any[] = doc.exists ? doc.data()?.messages || [] : [];
-
-    history.push({ role, parts: [{ text }] });
-
-    if (history.length > HISTORY_LIMIT) {
-      history = history.slice(-HISTORY_LIMIT);
-    }
-
-    while (history.length > 0 && history[0].role !== "user") {
-      history.shift();
-    }
-
-    transaction.set(docRef, {
-      messages: history,
-      phone,
-      updatedAt: FieldValue.serverTimestamp(),
-    }, { merge: true });
-
-    return history;
-  });
-}
-
-async function callGemini(history: any[], apiKey: string): Promise<string> {
-  const client = getGeminiClient(apiKey);
-
-  const result = await Promise.race([
-    client.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: history,
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        temperature: 0.7,
-      } as any,
-    }),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Gemini timeout (30s)")), 30000)
-    ),
-  ]) as any;
-
-  const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("Gemini retornou resposta vazia.");
-  return text;
-}
-
-async function sendWhatsApp(
-  remoteJid: string,
-  text: string,
-  evolutionUrl: string,
-  evolutionKey: string,
-  instance: string
-): Promise<void> {
-  const number = remoteJid.split("@")[0];
-
-  await axios.post(
-    `${evolutionUrl}/message/sendText/${instance}`,
-    { number, text },
-    {
-      headers: {
-        apikey: evolutionKey,
-        "ngrok-skip-browser-warning": "true",
-      },
-      timeout: 30000,
-    }
-  );
-}
-
-async function isMessageNew(messageId: string, remoteJid: string, text: string): Promise<boolean> {
-  if (!messageId) return true;
-
-  const docRef = db.collection("processed_messages").doc(messageId);
-
-  return await db.runTransaction(async (transaction) => {
-    const doc = await transaction.get(docRef);
-    if (doc.exists) return false;
-
-    transaction.set(docRef, {
-      processedAt: FieldValue.serverTimestamp(),
-      remoteJid,
-      text: text.substring(0, 100),
-    });
-    return true;
-  });
-}
-
-export const whatsappWebhook = onRequest(
-  { secrets: [GEMINI_API_KEY, EVOLUTION_API_URL, EVOLUTION_API_KEY, EVOLUTION_INSTANCE] },
-  async (req, res) => {
-    const { event, data } = req.body;
-
-    if (event !== "messages.upsert" || !data || data.key?.fromMe) {
-      res.status(200).send("Ignored");
-      return;
-    }
-
-    const remoteJid: string = data.key.remoteJid;
-    const messageId: string = data.key.id;
-
-    // Ignora grupos e @lid (formato privado do WhatsApp)
-    if (remoteJid.includes("@g.us") || remoteJid.includes("@lid")) {
-      res.status(200).send("Filtered");
-      return;
-    }
-
-    const userText: string = data.message?.conversation ||
-      data.message?.extendedTextMessage?.text || "";
-
-    if (!userText) {
-      res.status(200).send("No text");
-      return;
-    }
-
-    if (!(await isMessageNew(messageId, remoteJid, userText))) {
-      res.status(200).send("Duplicate");
-      return;
-    }
-
-    try {
-      const history = await syncChatHistory(remoteJid, "user", userText);
-      const aiResponse = await callGemini(history, GEMINI_API_KEY.value());
-      await syncChatHistory(remoteJid, "model", aiResponse);
-      await sendWhatsApp(
-        remoteJid,
-        aiResponse,
-        EVOLUTION_API_URL.value(),
-        EVOLUTION_API_KEY.value(),
-        EVOLUTION_INSTANCE.value()
-      );
-
-      res.status(200).send("OK");
-    } catch (error: any) {
-      console.error("[Error]", error.message);
-      res.status(500).send({ status: "error", message: error.message });
-    }
-  }
-);
-
-// Limpeza diária do Firestore
-export const cleanProcessedMessages = onSchedule("every 24 hours", async () => {
-  const cutoff = new Date();
-  cutoff.setHours(cutoff.getHours() - 24);
-
-  const snapshot = await db
-    .collection("processed_messages")
-    .where("processedAt", "<", cutoff)
-    .limit(500)
-    .get();
-
-  if (snapshot.empty) return;
-
-  const batch = db.batch();
-  snapshot.docs.forEach(doc => batch.delete(doc.ref));
-  await batch.commit();
-
-  console.log(`[Cleanup] ${snapshot.size} documentos removidos.`);
-});
-```
-
-### 7.2 Por que usamos o SDK `@google/genai` em vez de Axios?
-
-| | SDK `@google/genai` | Axios direto |
-|---|---|---|
-| Tipagem TypeScript | ✅ Nativa | ❌ Manual |
-| Manutenção | ✅ Automática com updates | ❌ Quebra com mudanças de API |
-| Autenticação | ✅ Gerenciada | ❌ Manual |
-| Retry automático | ✅ Sim | ❌ Não |
-
-### 7.3 Por que usar Secret Manager em vez de `.env`?
-
-| | Secret Manager | `.env` local |
-|---|---|---|
-| Segurança | ✅ Criptografado | ❌ Texto puro |
-| Rotação de chaves | ✅ Versionado | ❌ Manual |
-| Acesso auditado | ✅ Logs de acesso | ❌ Nenhum |
-| CI/CD | ✅ Integrado | ❌ Risco de commit |
-
----
-
-## 8. 🚀 Deploy
-
-### 8.1 Build e deploy
+### 6.1 Build e deploy
 
 ```bash
 cd functions
@@ -554,30 +272,30 @@ cd ..
 firebase deploy --only functions
 ```
 
-### 8.2 Configurar permissões de acesso público
+O comando faz o build do TypeScript, empacota e envia para o Firebase. Ao final, a URL da função é exibida no terminal.
 
-Após o primeiro deploy, libere o acesso público à Cloud Function:
+### 6.2 Configurar permissões no IAM
+
+Acesse [IAM do Google Cloud](https://console.cloud.google.com/iam-admin/iam) e adicione os seguintes papéis para a conta `SEU_PROJECT_NUMBER-compute@developer.gserviceaccount.com`:
+
+- **Cloud Build Service Account**
+- **Logs Writer**
+- **Storage Object Admin**
+- **Artifact Registry Writer**
+- **Cloud Datastore User**
+
+### 6.3 Liberar acesso público à Cloud Function
 
 1. Acesse [console.cloud.google.com/run](https://console.cloud.google.com/run)
 2. Clique em **whatsappwebhook**
 3. Aba **"Segurança"** → selecione **"Permitir acesso público"**
 4. Salve
 
-### 8.3 Configurar permissões do IAM
-
-Acesse [IAM do Google Cloud](https://console.cloud.google.com/iam-admin/iam) e adicione os seguintes papéis para a conta `SEU_PROJECT_NUMBER-compute@developer.gserviceaccount.com`:
-
-- Cloud Build Service Account
-- Logs Writer
-- Storage Object Admin
-- Artifact Registry Writer
-- Cloud Datastore User
-
 ---
 
-## 9. 🔗 Configurando o Webhook da Evolution API
+## 7. Webhook
 
-### 9.1 Registrar o webhook
+Com a Cloud Function deployada e a Evolution API rodando, registre o webhook para que as mensagens do WhatsApp sejam enviadas à função:
 
 ```bash
 curl -X POST "http://localhost:8080/webhook/set/fleetmaster" \
@@ -585,7 +303,7 @@ curl -X POST "http://localhost:8080/webhook/set/fleetmaster" \
   -H "Content-Type: application/json" \
   -d '{
     "webhook": {
-      "url": "https://whatsappwebhook-XXXX-uc.a.run.app",
+      "url": "https://URL_DA_SUA_CLOUD_FUNCTION",
       "enabled": true,
       "events": ["MESSAGES_UPSERT"],
       "webhookByEvents": false,
@@ -594,7 +312,7 @@ curl -X POST "http://localhost:8080/webhook/set/fleetmaster" \
   }'
 ```
 
-### 9.2 Verificar o webhook
+Confirme que o webhook foi registrado:
 
 ```bash
 curl -X GET "http://localhost:8080/webhook/find/fleetmaster" \
@@ -603,12 +321,43 @@ curl -X GET "http://localhost:8080/webhook/find/fleetmaster" \
 
 ---
 
-## 10. 🧪 Testando sem número real
+## 8. Monitoramento
 
-Simule uma mensagem chegando diretamente na Cloud Function:
+### 8.1 Criar canal de notificação por email
 
 ```bash
-curl -X POST "https://whatsappwebhook-XXXX-uc.a.run.app" \
+gcloud alpha monitoring channels create \
+  --display-name="FleetMaster Alerts" \
+  --type=email \
+  --channel-labels=email_address=seu@email.com
+```
+
+O comando retorna um ID no formato `projects/.../notificationChannels/NUMERO`.
+
+### 8.2 Criar política de alertas
+
+1. Acesse [console.cloud.google.com/monitoring/alerting](https://console.cloud.google.com/monitoring/alerting)
+2. Clique em **"Criar política"**
+3. Métrica: **Cloud Run Revision → Request Count**
+4. Filtros: `service_name = whatsappwebhook` e `response_code_class = 5xx`
+5. Threshold: `3` erros em `5 minutos`
+6. Notificação: canal criado no passo anterior
+7. Nome: `FleetMaster Bot - Erros Críticos`
+
+### 8.3 Visualizar logs em tempo real
+
+```bash
+firebase functions:log --only whatsappWebhook
+```
+
+---
+
+## 9. Testando
+
+### 9.1 Simular uma mensagem sem número real
+
+```bash
+curl -X POST "https://URL_DA_SUA_CLOUD_FUNCTION" \
   -H "Content-Type: application/json" \
   -d '{
     "event": "messages.upsert",
@@ -616,7 +365,7 @@ curl -X POST "https://whatsappwebhook-XXXX-uc.a.run.app" \
       "key": {
         "remoteJid": "5511999999999@s.whatsapp.net",
         "fromMe": false,
-        "id": "TEST_MESSAGE_ID_001"
+        "id": "TEST_ID_001"
       },
       "message": {
         "conversation": "Olá, quero saber sobre os planos"
@@ -627,7 +376,7 @@ curl -X POST "https://whatsappwebhook-XXXX-uc.a.run.app" \
 
 Resposta esperada: `OK`
 
-### 10.1 Testar envio direto pela Evolution API
+### 9.2 Testar envio direto pela Evolution API
 
 ```bash
 curl -X POST "http://localhost:8080/message/sendText/fleetmaster" \
@@ -635,40 +384,13 @@ curl -X POST "http://localhost:8080/message/sendText/fleetmaster" \
   -H "Content-Type: application/json" \
   -d '{
     "number": "5511999999999",
-    "text": "Teste direto da Evolution API"
+    "text": "Teste de envio direto"
   }'
 ```
 
----
+### 9.3 Atualizar a URL do ngrok
 
-## 11. 📊 Monitoramento
-
-### 11.1 Criar canal de notificação
-
-```bash
-gcloud alpha monitoring channels create \
-  --display-name="FleetMaster Alerts" \
-  --type=email \
-  --channel-labels=email_address=seu@email.com
-```
-
-### 11.2 Criar política de alertas
-
-1. Acesse [console.cloud.google.com/monitoring/alerting](https://console.cloud.google.com/monitoring/alerting)
-2. Clique em **"Criar política"**
-3. Métrica: **Cloud Run Revision → Request Count**
-4. Filtros:
-   - `service_name = whatsappwebhook`
-   - `response_code_class = 5xx`
-5. Threshold: `3` erros em `5 minutos`
-6. Notificação: canal criado no passo anterior
-7. Nome: `FleetMaster Bot - Erros Críticos`
-
----
-
-## 12. 🔄 Atualizar a URL do ngrok
-
-Sempre que reiniciar o ngrok, a URL muda. Atualize o secret:
+Sempre que o ngrok for reiniciado, atualize o secret e faça novo deploy:
 
 ```bash
 echo -n "https://nova-url.ngrok-free.app" | gcloud secrets versions add EVOLUTION_API_URL --data-file=-
@@ -677,70 +399,63 @@ firebase deploy --only functions
 
 ---
 
-## 13. 📁 Estrutura do Projeto
+## 10. Problemas Comuns
 
-```
-fleetmaster-bot/
-├── evolution-api/
-│   ├── docker-compose.yml
-│   └── .env                    # NÃO commitar no git
-├── functions/
-│   ├── src/
-│   │   └── index.ts            # Cloud Function principal
-│   ├── lib/                    # Build gerado automaticamente
-│   ├── package.json
-│   └── tsconfig.json
-├── .firebaserc
-├── firebase.json
-└── README.md
-```
+**QR Code não aparece no manager**
+Atualize a variável `CONFIG_SESSION_PHONE_VERSION` no `evolution-api/.env` com a versão mais recente do cliente WhatsApp Web. Consulte a [documentação da Evolution API](https://doc.evolution-api.com).
 
----
-
-## 14. ⚠️ Problemas Comuns
-
-**QR Code não aparece**
-→ Verifique a variável `CONFIG_SESSION_PHONE_VERSION` no `.env` da Evolution API. Use a versão mais recente.
-
-**Mensagem duplicada**
-→ A Evolution API envia dois webhooks para a mesma mensagem (um `@s.whatsapp.net` e um `@lid`). O código já filtra `@lid` automaticamente e usa deduplicação por `messageId`.
+**Mensagem duplicada no WhatsApp**
+O WhatsApp envia dois webhooks para a mesma mensagem — um com `@s.whatsapp.net` e outro com `@lid`. O código filtra `@lid` automaticamente. Se o problema persistir, verifique os logs da função.
 
 **Cloud Function retorna 403**
-→ Verifique se o acesso público está liberado no Cloud Run.
+O acesso público não foi liberado no Cloud Run. Siga o passo [6.3](#63-liberar-acesso-público-à-cloud-function).
 
-**Secret não encontrado**
-→ Confirme que a conta de serviço tem o papel `roles/secretmanager.secretAccessor`.
+**Secret não encontrado no deploy**
+Confirme que a conta de serviço tem o papel `roles/secretmanager.secretAccessor` para cada secret. Execute novamente o comando do passo [5.4](#54-dar-permissão-à-conta-de-serviço-da-cloud-function).
 
-**ngrok retorna 502**
-→ A Evolution API caiu. Execute `docker-compose restart evolution-api`.
+**ngrok retorna 502 ou timeout**
+A Evolution API caiu. Reinicie o container:
+
+```bash
+docker-compose restart evolution-api
+```
+
+**Variável de ambiente conflita com secret**
+Se houver um `.env` local na pasta `functions`, remova-o — ele conflita com o Secret Manager:
+
+```bash
+rm functions/.env
+```
 
 ---
 
-## 15. ✅ Checklist de Produção
+## Checklist de Produção
 
-- [ ] Evolution API em VPS (não depender do ngrok)
-- [ ] URL fixa configurada no Secret Manager
-- [ ] Reconexão automática do WhatsApp configurada
-- [ ] Alertas de monitoramento ativos
-- [ ] Backup do Firestore configurado
-- [ ] Regras de segurança do Firestore revisadas
+Antes de ir para produção, certifique-se de:
+
+- [ ] Hospedar a Evolution API em uma VPS com URL fixa (sem ngrok)
+- [ ] Atualizar `EVOLUTION_API_URL` no Secret Manager com a URL da VPS
+- [ ] Configurar reconexão automática do WhatsApp
+- [ ] Revisar as regras de segurança do Firestore
+- [ ] Verificar se os alertas de monitoramento estão ativos
+- [ ] Remover qualquer arquivo `.env` do repositório
 
 ---
 
-## 🛠️ Tecnologias
+## Tecnologias
 
-| Tecnologia | Uso |
+| Tecnologia | Papel |
 |---|---|
-| Firebase Cloud Functions | Webhook e lógica principal |
-| Google Firestore | Histórico de conversas |
+| Firebase Cloud Functions | Webhook e orquestração |
+| Google Firestore | Histórico de conversas por número |
 | Google Secret Manager | Armazenamento seguro de chaves |
-| Google Gemini 2.5 Flash | Modelo de IA |
+| Google Gemini 2.5 Flash | Modelo de linguagem |
 | Evolution API | Integração com WhatsApp |
-| Docker + PostgreSQL | Infraestrutura da Evolution API |
+| Docker + PostgreSQL | Infraestrutura local da Evolution API |
 | ngrok | Túnel para desenvolvimento local |
 
 ---
 
-## 📄 Licença
+## Licença
 
 MIT
